@@ -24,6 +24,7 @@ class State(TypedDict):
     intent: Optional[str]
     playlist_name: Optional[str]
     song_name: Optional[str] 
+    song_ids: Optional[List[str]]
     artist_name: Optional[str] 
     num_songs: int
     mood: Optional[str]
@@ -42,7 +43,7 @@ query_extraction_function = {
     "parameters": {
         "type": "object",
         "properties": {
-            "intent": {"type": "string", "enum": ["find_songs", "create_playlist"], "description": "User's intent"},
+            "intent": {"type": "string", "enum": ["find_songs", "create_playlist", "add_songs"], "description": "User's intent"},
             "playlist_name": {"type": "string", "description": "Playlist name"},
             "song_name": {"type": "string", "description": "Song name"},
             "artist_name": {"type": "string", "description": "Artist name"},
@@ -76,6 +77,29 @@ def extract_user_query(state: State) -> State:
     return state  # Return unchanged if no function call occurred
 
 
+def find_songs(state: State) -> State:
+    """Find songs based on user input."""
+    song_name = state.get("song_name")
+    artist_name = state.get("artist_name")
+    
+    num_songs = state.get("num_songs")
+    if num_songs:
+        limit = state["num_songs"]
+    else:
+        limit = 10
+    
+    if song_name and artist_name:
+        results = sp.search(q=f"track:{state['song_name']} artist:{state['artist_name']}", type="track", limit=limit)
+    elif not song_name and artist_name:
+        results = sp.search(q=f"artist:{state['artist_name']}", type="track", limit=limit)
+    if not results["tracks"]["items"]:
+        return state
+    
+    song_ids = [item["id"] for item in results["tracks"]["items"]]
+    
+    return {"tracks": song_ids}
+
+# deprecated
 def get_similar_songs(state: State) -> State:
     """Find similar songs based on a track name and artist."""
     song_name = state.get("song_name")
@@ -104,6 +128,7 @@ def get_similar_songs(state: State) -> State:
     return {"tracks": song_ids}
 
 
+# deprecated
 def filter_songs_by_energy(state: State) -> State:
     """Filter recommended songs based on energy level."""
     song_name = state.get("song_name")
@@ -126,7 +151,19 @@ def create_playlist(state: State) -> State:
     if song_ids:
         sp.playlist_add_items(playlist["id"], state["song_ids"])
     
-    return {"playlist_url": playlist["external_urls"]["spotify"]}
+    return {"playlist_uri": playlist["external_urls"]["spotify"]}
+
+
+def add_tracks_to_playlist(state: State) -> State:
+    """Add tracks to an existing playlist."""
+    user_id = sp.current_user()["id"]
+    playlist_id = state["playlist_uri"].split("/")[-1]
+    
+    song_ids = state.get("tracks")
+    if song_ids:
+        sp.playlist_add_items(playlist_id, song_ids)
+    
+    return {"playlist_url": state["playlist_uri"]}
 
 # Create StateGraph
 graph = StateGraph(State)
@@ -135,17 +172,21 @@ graph = StateGraph(State)
 graph.add_node("extract_intent", extract_user_query)
 graph.add_node("get_similar_songs", get_similar_songs)
 graph.add_node("filter_songs", filter_songs_by_energy)
+graph.add_node("find_specific_songs", find_songs)
 graph.add_node("create_playlist", create_playlist)
+graph.add_node("add_tracks_to_playlist", add_tracks_to_playlist)
 
 # Define edges
 graph.set_entry_point("extract_intent")
 graph.add_edge("extract_intent", "get_similar_songs")
 graph.add_edge("get_similar_songs", "filter_songs")
-graph.add_edge("filter_songs", "create_playlist")
+graph.add_edge("filter_songs", "find_specific_songs")
+graph.add_edge("find_specific_songs", "create_playlist")
+graph.add_edge("create_playlist", "add_tracks_to_playlist")
 
 graph = graph.compile()
 
-user_query = "Create a playlist called This works."
+user_query = "Find the 5 most played songs by Micheal Jackson and add them to a playlist called AI Jackson."
 
 state = {"user_input": user_query}
 
